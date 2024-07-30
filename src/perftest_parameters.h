@@ -155,7 +155,7 @@
 #define MIN_HOP_LIMIT	(0)
 #define MAX_HOP_LIMIT	(255)
 #define MIN_IB_PORT   (1)
-#define MIN_ITER      (5)
+#define MIN_ITER      (1)
 #define MAX_ITER      (4294967296)
 #define MIN_TX 	      (1)
 #define MAX_TX	      (15000)
