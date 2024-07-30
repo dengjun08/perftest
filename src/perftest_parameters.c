@@ -1083,9 +1083,9 @@ static void force_dependecies(struct perftest_parameters *user_param)
 	}
 
 	if (user_param->test_method != RUN_INFINITELY && user_param->test_type == ITERATIONS) {
-		if (user_param->tx_depth > user_param->iters) {
-			user_param->tx_depth = user_param->iters;
-		}
+		//if (user_param->tx_depth > user_param->iters) {
+		//	user_param->tx_depth = user_param->iters;
+		//}
 
 		if ((user_param->verb == SEND || user_param->verb == WRITE_IMM) &&
 				user_param->rx_depth > user_param->iters) {
@@ -2544,11 +2544,11 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 			case 'x': CHECK_VALUE_IN_RANGE_UNS(user_param->gid_index,uint8_t,MIN_GID_IX,MAX_GID_IX,"Gid index",not_int_ptr);
 				  user_param->use_gid_user = 1; break;
 			case 'c': change_conn_type(&user_param->connection_type,user_param->verb,optarg); break;
-			case 'q': if (user_param->tst != BW) {
-					fprintf(stderr," Multiple QPs only available on bw tests\n");
-					free(duplicates_checker);
-					return FAILURE;
-				  }
+			case 'q': //if (user_param->tst != BW) {
+					//fprintf(stderr," Multiple QPs only available on bw tests\n");
+					//free(duplicates_checker);
+					//return FAILURE;
+				  //}
 				  CHECK_VALUE_IN_RANGE(user_param->num_of_qps,int,MIN_QP_NUM,MAX_QP_NUM,"num of Qps",not_int_ptr);
 				  break;
 			case 'I': CHECK_VALUE_IN_RANGE(user_param->inline_size,int,0,MAX_INLINE,"Max inline",not_int_ptr);

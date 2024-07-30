@@ -677,8 +677,9 @@ static inline int post_send_method(struct pingpong_context *ctx, int index,
 	struct perftest_parameters *user_param)
 {
 	#ifdef HAVE_IBV_WR_API
-	if (!user_param->use_old_post_send)
+	if (!user_param->use_old_post_send) {
 		return (*ctx->new_post_send_work_request_func_pointer)(ctx, index, user_param);
+	}
 	#endif
 	struct ibv_send_wr 	*bad_wr = NULL;
 	return ibv_post_send(ctx->qp[index], &ctx->wr[index*user_param->post_list], &bad_wr);
@@ -3371,6 +3372,8 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	uintptr_t		primary_send_addr = ctx->sge_list[0].addr;
 	int			address_offset = 0;
 	int			flows_burst_iter = 0;
+	struct timeval tv_start, tv_end;
+	double sec_elapsed;
 
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
@@ -3434,6 +3437,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	}
 
 	/* main loop for posting */
+	gettimeofday(&tv_start, NULL);
 	while (totscnt < tot_iters  || totccnt < tot_iters ||
 		(user_param->test_type == DURATION && user_param->state != END_STATE) ) {
 
@@ -3569,6 +3573,10 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 					}
 		}
 	}
+	gettimeofday(&tv_end, NULL);
+	sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) +
+                  (tv_end.tv_usec - tv_start.tv_usec) * 1e-6;
+	fprintf(stdout, "sec_elapsed = %.6f\n", sec_elapsed);
 	if (user_param->noPeak == ON && user_param->test_type == ITERATIONS)
 		user_param->tcompleted[0] = get_cycles();
 
@@ -4412,20 +4420,15 @@ cleaning:
 int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *user_param)
 {
 	uint64_t                scnt = 0;
-	uint64_t                ccnt = 0;
-	uint64_t                rcnt = 0;
 	int                     ne;
-	int			err = 0;
-	int 			poll_buf_offset = 0;
-	volatile char           *poll_buf = NULL;
-	volatile char           *post_buf = NULL;
-
 
 	struct ibv_wc           wc;
 
-	int 			cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
-	int 			total_gap_cycles = user_param->latency_gap * cpu_mhz;
-	cycles_t 		end_cycle, start_gap;
+	uint64_t	   	tot_iters;
+	struct timeval tv_start, tv_end;
+	int 			num_of_qps = user_param->num_of_qps;
+	double sec_elapsed;
+	int			index;
 
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
@@ -4440,11 +4443,8 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	}
 
 
-	if((user_param->use_xrc || user_param->connection_type == DC))
-		poll_buf_offset = 1;
-
-	post_buf = (char*)ctx->buf[0] + user_param->size - 1;
-	poll_buf = (char*)ctx->buf[0] + (user_param->num_of_qps + poll_buf_offset)*BUFF_SIZE(ctx->size, ctx->cycle_buffer) + user_param->size - 1;
+	if (user_param->connection_type == DC)
+		num_of_qps /= 2;
 
 	/* Duration support in latency tests. */
 	if (user_param->test_type == DURATION) {
@@ -4458,63 +4458,61 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 			catch_alarm(0);
 	}
 
+	tot_iters = (uint64_t)user_param->iters*num_of_qps;
+	gettimeofday(&tv_start, NULL);
 	/* Done with setup. Start the test. */
-	while (scnt < user_param->iters || ccnt < user_param->iters || rcnt < user_param->iters
-			|| ((user_param->test_type == DURATION && user_param->state != END_STATE))) {
+	while (scnt < tot_iters) {
+		int rc;
+		ibv_wr_start(ctx->qpx[0]);
+		for (index =0 ; index < num_of_qps ; index++) {
+			int wr_index = index * user_param->post_list;
+			struct ibv_send_wr *wr = &ctx->wr[wr_index];
 
-		if ((rcnt < user_param->iters || user_param->test_type == DURATION) && !(scnt < 1 && user_param->machine == SERVER)) {
-			rcnt++;
-			while (*poll_buf != (char)rcnt && user_param->state != END_STATE);
+			wr->sg_list->length = user_param->size;
+			wr->send_flags = IBV_SEND_SIGNALED;
+
+			ctx->qpx[0]->wr_id = wr->wr_id;
+			ctx->qpx[0]->wr_flags = wr->send_flags;
+
+			ibv_wr_rdma_write(ctx->qpx[0], wr->wr.rdma.rkey, wr->wr.rdma.remote_addr);
+
+			//fprintf(stderr,"ctx->qp[0]->qp_num = 0x%x, ctx->dci_stream_id[0]=%d\n",ctx->qp[0]->qp_num, ctx->dci_stream_id[0]);
+			mlx5dv_wr_set_dc_addr_stream(ctx->dv_qp[0], ctx->ah[0],
+							ctx->r_dctn[index], DC_KEY,
+							ctx->dci_stream_id[0]);
+			ctx->dci_stream_id[0] = (ctx->dci_stream_id[0] + 1) & (0xffffffff >> (32 - (user_param->log_active_dci_streams)));
+
+			ibv_wr_set_sge(ctx->qpx[0], wr->sg_list->lkey,
+					wr->sg_list->addr,
+					user_param->size);
+
+			scnt++;
 		}
-
-		if (scnt < user_param->iters || user_param->test_type == DURATION) {
-
-			if (user_param->latency_gap) {
-				start_gap = get_cycles();
-				end_cycle = start_gap + total_gap_cycles;
-				while (get_cycles() < end_cycle) {
-					continue;
-				}
-			}
-
-			if (user_param->test_type == ITERATIONS)
-				user_param->tposted[scnt] = get_cycles();
-
-			*post_buf = (char)++scnt;
-
-			err = post_send_method(ctx, 0, user_param);
-
-			if (err) {
-				fprintf(stderr,"Couldn't post send: scnt=%lu\n",scnt);
-				return 1;
-			}
+		rc = ibv_wr_complete(ctx->qpx[0]);
+		if (rc) {
+			fprintf(stderr,"Couldn't complete: scnt=%lu, rc=%d\n",scnt, rc);
+			return 1;
 		}
-
-		if (user_param->test_type == DURATION && user_param->state == END_STATE)
-			break;
-
-		if (ccnt < user_param->iters || user_param->test_type == DURATION) {
-
-			do { ne = ibv_poll_cq(ctx->send_cq, 1, &wc); } while (ne == 0);
-
+		do {
+			ne = ibv_poll_cq(ctx->send_cq, 1, &wc);
 			if(ne > 0) {
-
 				if (wc.status != IBV_WC_SUCCESS) {
 					//coverity[uninit_use_in_call]
-					NOTIFY_COMP_ERROR_SEND(wc,scnt,ccnt);
+					NOTIFY_COMP_ERROR_SEND(wc,scnt,scnt);
 					return 1;
 				}
-
-				ccnt++;
-				if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
-					user_param->iters++;
 
 			} else if (ne < 0) {
 				fprintf(stderr, "poll CQ failed %d\n", ne);
 				return FAILURE;
 			}
-		}
+
+		} while (ne == 0);
 	}
+	gettimeofday(&tv_end, NULL);
+	sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) +
+                  (tv_end.tv_usec - tv_start.tv_usec) * 1e-6;
+	fprintf(stdout, "sec_elapsed = %.6f\n", sec_elapsed);
 	return 0;
 }
 
@@ -4663,11 +4661,12 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
 {
 	uint64_t	scnt = 0;
 	int 		ne;
-	int		err = 0;
 	struct 		ibv_wc wc;
-	int 		cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
-	int 		total_gap_cycles = user_param->latency_gap * cpu_mhz;
-	cycles_t 	end_cycle, start_gap;
+	uint64_t	   	tot_iters;
+	struct timeval tv_start, tv_end;
+	int 			num_of_qps = user_param->num_of_qps;
+	double sec_elapsed;
+	int			index;
 
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
@@ -4688,34 +4687,43 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
 		else
 			catch_alarm(0);
 	}
-	while (scnt < user_param->iters || (user_param->test_type == DURATION && user_param->state != END_STATE)) {
-		if (user_param->latency_gap) {
-			start_gap = get_cycles();
-			end_cycle = start_gap + total_gap_cycles;
-			while (get_cycles() < end_cycle) {
-				continue;
-			}
+	if (user_param->connection_type == DC)
+		num_of_qps /= 2;
+
+	tot_iters = (uint64_t)user_param->iters*num_of_qps;
+	gettimeofday(&tv_start, NULL);
+	while (scnt < tot_iters || (user_param->test_type == DURATION && user_param->state != END_STATE)) {
+		int rc;
+		ibv_wr_start(ctx->qpx[0]);
+		for (index =0 ; index < num_of_qps ; index++) {
+			int wr_index = index * user_param->post_list;
+			struct ibv_send_wr *wr = &ctx->wr[wr_index];
+
+			wr->sg_list->length = user_param->size;
+			wr->send_flags = IBV_SEND_SIGNALED;
+
+			ctx->qpx[0]->wr_id = wr->wr_id;
+			ctx->qpx[0]->wr_flags = wr->send_flags;
+
+			ibv_wr_rdma_read(ctx->qpx[0], wr->wr.rdma.rkey, wr->wr.rdma.remote_addr);
+
+			//fprintf(stderr,"ctx->qp[0]->qp_num = 0x%x, ctx->dci_stream_id[0]=%d\n",ctx->qp[0]->qp_num, ctx->dci_stream_id[0]);
+			mlx5dv_wr_set_dc_addr_stream(ctx->dv_qp[0], ctx->ah[0],
+							ctx->r_dctn[index], DC_KEY,
+							ctx->dci_stream_id[0]);
+			ctx->dci_stream_id[0] = (ctx->dci_stream_id[0] + 1) & (0xffffffff >> (32 - (user_param->log_active_dci_streams)));
+
+			ibv_wr_set_sge(ctx->qpx[0], wr->sg_list->lkey,
+					wr->sg_list->addr,
+					user_param->size);
+
+			scnt++;
 		}
-		if (user_param->test_type == ITERATIONS)
-			user_param->tposted[scnt++] = get_cycles();
-
-		err = post_send_method(ctx, 0, user_param);
-
-		if (err) {
-			fprintf(stderr,"Couldn't post send: scnt=%lu\n",scnt);
+		rc = ibv_wr_complete(ctx->qpx[0]);
+		if (rc) {
+			fprintf(stderr,"Couldn't complete: scnt=%lu, rc=%d\n",scnt, rc);
 			return 1;
 		}
-
-		if (user_param->test_type == DURATION && user_param->state == END_STATE)
-			break;
-
-		if (user_param->use_event) {
-			if (ctx_notify_events(ctx->send_channel)) {
-				fprintf(stderr, "Couldn't request CQ notification\n");
-				return 1;
-			}
-		}
-
 		do {
 			ne = ibv_poll_cq(ctx->send_cq, 1, &wc);
 			if(ne > 0) {
@@ -4724,16 +4732,18 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
 					NOTIFY_COMP_ERROR_SEND(wc,scnt,scnt);
 					return 1;
 				}
-				if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
-					user_param->iters++;
 
 			} else if (ne < 0) {
 				fprintf(stderr, "poll CQ failed %d\n", ne);
 				return FAILURE;
 			}
 
-		} while (!user_param->use_event && ne == 0);
+		} while (ne == 0);
 	}
+	gettimeofday(&tv_end, NULL);
+	sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) +
+                  (tv_end.tv_usec - tv_start.tv_usec) * 1e-6;
+	fprintf(stdout, "sec_elapsed = %.6f\n", sec_elapsed);
 
 	return 0;
 }
