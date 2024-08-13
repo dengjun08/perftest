@@ -4417,6 +4417,7 @@ cleaning:
 /******************************************************************************
  *
  ******************************************************************************/
+//#define DSCS_NUM 128
 int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *user_param)
 {
 	uint64_t                scnt = 0;
@@ -4428,7 +4429,7 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	struct timeval tv_start, tv_end;
 	int 			num_of_qps = user_param->num_of_qps;
 	double sec_elapsed;
-	int			index;
+	int			index, dcs_idx, dscs_num, streams;
 
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
@@ -4459,55 +4460,71 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	}
 
 	tot_iters = (uint64_t)user_param->iters*num_of_qps;
+	//sub_num = num_of_qps/DSCS_NUM;
+	streams = 1 << user_param->log_dci_streams;
+	dscs_num = num_of_qps/streams;
 	gettimeofday(&tv_start, NULL);
 	/* Done with setup. Start the test. */
 	while (scnt < tot_iters) {
 		int rc;
-		ibv_wr_start(ctx->qpx[0]);
-		for (index =0 ; index < num_of_qps ; index++) {
-			int wr_index = index * user_param->post_list;
-			struct ibv_send_wr *wr = &ctx->wr[wr_index];
+		for (dcs_idx = 0; dcs_idx < dscs_num; dcs_idx++) {
+			ibv_wr_start(ctx->qpx[dcs_idx]);
+			for (index = 0 ; index < streams ; index++) {
 
-			wr->sg_list->length = user_param->size;
-			wr->send_flags = IBV_SEND_SIGNALED;
+				int wr_index = (index + dcs_idx * streams) * user_param->post_list;
+				struct ibv_send_wr *wr = &ctx->wr[wr_index];
 
-			ctx->qpx[0]->wr_id = wr->wr_id;
-			ctx->qpx[0]->wr_flags = wr->send_flags;
+				wr->sg_list->length = user_param->size;
+				if (index == streams - 1)
+					wr->send_flags = IBV_SEND_SIGNALED;
+				else
+					wr->send_flags = 0;
 
-			ibv_wr_rdma_write(ctx->qpx[0], wr->wr.rdma.rkey, wr->wr.rdma.remote_addr);
+				ctx->qpx[dcs_idx]->wr_id = wr->wr_id;
+				ctx->qpx[dcs_idx]->wr_flags = wr->send_flags;
 
-			//fprintf(stderr,"ctx->qp[0]->qp_num = 0x%x, ctx->dci_stream_id[0]=%d\n",ctx->qp[0]->qp_num, ctx->dci_stream_id[0]);
-			mlx5dv_wr_set_dc_addr_stream(ctx->dv_qp[0], ctx->ah[0],
-							ctx->r_dctn[index], DC_KEY,
-							ctx->dci_stream_id[0]);
-			ctx->dci_stream_id[0] = (ctx->dci_stream_id[0] + 1) & (0xffffffff >> (32 - (user_param->log_active_dci_streams)));
+				ibv_wr_rdma_write(ctx->qpx[dcs_idx], wr->wr.rdma.rkey, wr->wr.rdma.remote_addr);
 
-			ibv_wr_set_sge(ctx->qpx[0], wr->sg_list->lkey,
-					wr->sg_list->addr,
-					user_param->size);
+				//fprintf(stderr,"ctx->qp[0]->qp_num = 0x%x, ctx->dci_stream_id[0]=%d\n",ctx->qp[0]->qp_num, ctx->dci_stream_id[0]);
+				mlx5dv_wr_set_dc_addr_stream(ctx->dv_qp[dcs_idx], ctx->ah[0],
+								ctx->r_dctn[index + dcs_idx * streams], DC_KEY,
+								ctx->dci_stream_id[dcs_idx]);
+				ctx->dci_stream_id[dcs_idx] = (ctx->dci_stream_id[dcs_idx] + 1) & (0xffffffff >> (32 - (user_param->log_active_dci_streams)));
 
-			scnt++;
+				ibv_wr_set_sge(ctx->qpx[dcs_idx], wr->sg_list->lkey,
+						wr->sg_list->addr,
+						user_param->size);
+
+				scnt++;
+			}
+			rc = ibv_wr_complete(ctx->qpx[dcs_idx]);
+			if (rc) {
+				fprintf(stderr,"Couldn't complete: scnt=%lu, rc=%d\n",scnt, rc);
+				return 1;
+			}
 		}
-		rc = ibv_wr_complete(ctx->qpx[0]);
-		if (rc) {
-			fprintf(stderr,"Couldn't complete: scnt=%lu, rc=%d\n",scnt, rc);
-			return 1;
-		}
-		do {
-			ne = ibv_poll_cq(ctx->send_cq, 1, &wc);
-			if(ne > 0) {
-				if (wc.status != IBV_WC_SUCCESS) {
-					//coverity[uninit_use_in_call]
-					NOTIFY_COMP_ERROR_SEND(wc,scnt,scnt);
-					return 1;
+
+		for (dcs_idx = 0; dcs_idx < dscs_num; dcs_idx++) {
+			do {
+				ne = ibv_poll_cq(ctx->send_cq, 1, &wc);
+				if(ne > 0) {
+					if (wc.status != IBV_WC_SUCCESS) {
+						//coverity[uninit_use_in_call]
+						NOTIFY_COMP_ERROR_SEND(wc,scnt,scnt);
+						return 1;
+					}
+
+					if (wc.opcode != IBV_WC_RDMA_WRITE)
+						continue;
+
+				} else if (ne < 0) {
+					fprintf(stderr, "poll CQ failed %d\n", ne);
+					return FAILURE;
 				}
 
-			} else if (ne < 0) {
-				fprintf(stderr, "poll CQ failed %d\n", ne);
-				return FAILURE;
-			}
+			} while (ne == 0);
+		}
 
-		} while (ne == 0);
 	}
 	gettimeofday(&tv_end, NULL);
 	sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) +
