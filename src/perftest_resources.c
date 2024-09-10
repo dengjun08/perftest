@@ -4426,9 +4426,9 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	struct ibv_wc           wc;
 
 	uint64_t	   	tot_iters;
-	struct timeval tv_start, tv_end;
+	struct timeval tv_start, tv_end, tv_sw;
 	int 			num_of_qps = user_param->num_of_qps;
-	double sec_elapsed;
+	double sec_elapsed, sec_elapsed_sw;
 	int			index, dcs_idx, dscs_num, streams;
 
 	#ifdef HAVE_IBV_WR_API
@@ -4503,6 +4503,7 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 				return 1;
 			}
 		}
+		gettimeofday(&tv_sw, NULL);
 
 		for (dcs_idx = 0; dcs_idx < dscs_num; dcs_idx++) {
 			do {
@@ -4529,7 +4530,9 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	gettimeofday(&tv_end, NULL);
 	sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) +
                   (tv_end.tv_usec - tv_start.tv_usec) * 1e-6;
-	fprintf(stdout, "sec_elapsed = %.6f\n", sec_elapsed);
+	sec_elapsed_sw = (tv_sw.tv_sec - tv_start.tv_sec) +
+                  (tv_sw.tv_usec - tv_start.tv_usec) * 1e-6;
+	fprintf(stdout, "sec_elapsed = %.6f sec_elapsed_sw = %.6f\n", sec_elapsed, sec_elapsed_sw);
 	return 0;
 }
 
