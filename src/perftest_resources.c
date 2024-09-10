@@ -4526,6 +4526,7 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 			} while (ne == 0);
 		}
 
+		break;
 	}
 	gettimeofday(&tv_end, NULL);
 	sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) +
