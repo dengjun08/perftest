@@ -25,6 +25,7 @@
 #ifdef HAVE_SRD
 #include <infiniband/efadv.h>
 #endif
+#include <math.h>
 
 #include "perftest_resources.h"
 #include "raw_ethernet_resources.h"
@@ -4413,6 +4414,16 @@ cleaning:
 	return return_value;
 }
 
+int compare(const void *a, const void *b) {
+    return (*(double *)a > *(double *)b) - (*(double *)a < *(double *)b);
+}
+
+double percentile(double *data, int size, double percentile) {
+    qsort(data, size, sizeof(double), compare);
+    int index = (int)ceil(percentile * size) - 1;
+    return data[index];
+}
+
 /******************************************************************************
  *
  ******************************************************************************/
@@ -4435,6 +4446,11 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	int 			num_of_qps = user_param->num_of_qps;
 	double sec_elapsed;
 	int			index;
+	// 用于记录每次循环的时间
+	double *times;
+	int iter_count = 0;
+        double total_time = 0.0;  // 用于计算平均值
+        double min_time = INFINITY;  // 初始化最小时间为正无穷
 
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
@@ -4466,9 +4482,12 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	}
 
 	tot_iters = (uint64_t)user_param->iters*num_of_qps;
-	gettimeofday(&tv_start, NULL);
+	times = (double *)malloc(tot_iters * sizeof(double));
 	/* Done with setup. Start the test. */
 	while (scnt < tot_iters  || ccnt < tot_iters) {
+
+		// 记录开始时间
+		gettimeofday(&tv_start, NULL);
 
 		for (index =0 ; index < num_of_qps ; index++) {
 
@@ -4491,6 +4510,7 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 
 				if (err) {
 					fprintf(stderr,"Couldn't post send: scnt=%lu\n",scnt);
+					free(times);  // 释放内存
 					return 1;
 				}
 			}
@@ -4506,6 +4526,7 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 					if (wc.status != IBV_WC_SUCCESS) {
 						//coverity[uninit_use_in_call]
 						NOTIFY_COMP_ERROR_SEND(wc,scnt,ccnt);
+						free(times);  // 释放内存
 						return 1;
 					}
 
@@ -4515,15 +4536,33 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 
 				} else if (ne < 0) {
 					fprintf(stderr, "poll CQ failed %d\n", ne);
+					free(times);  // 释放内存
 					return FAILURE;
 				}
 			}
 		}
+
+		// 记录结束时间
+		gettimeofday(&tv_end, NULL);
+		sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) + (tv_end.tv_usec - tv_start.tv_usec) * 1e-6;
+		times[iter_count++] = sec_elapsed;
+		// 更新总时间和最小时间
+		total_time += sec_elapsed;
+		if (sec_elapsed < min_time) {
+			min_time = sec_elapsed;
+		}
 	}
-	gettimeofday(&tv_end, NULL);
-	sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) +
-                  (tv_end.tv_usec - tv_start.tv_usec) * 1e-6;
-	fprintf(stdout, "sec_elapsed = %.6f\n", sec_elapsed);
+
+	// 计算 p50 和 p99
+	double p50 = percentile(times, iter_count, 0.50);
+	double p99 = percentile(times, iter_count, 0.99);
+	double avg_time = total_time / iter_count;
+
+	// 输出 min, average, p50 和 p99
+	fprintf(stdout, "Min = %.6f seconds, Avg = %.6f seconds, P50 = %.6f seconds, P99 = %.6f seconds\n",
+		min_time, avg_time, p50, p99);
+	free(times);  // 释放内存
+
 	return 0;
 }
 
