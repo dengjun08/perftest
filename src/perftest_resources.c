@@ -25,6 +25,7 @@
 #ifdef HAVE_SRD
 #include <infiniband/efadv.h>
 #endif
+#include <math.h>
 
 #include "perftest_resources.h"
 #include "raw_ethernet_resources.h"
@@ -4414,6 +4415,16 @@ cleaning:
 	return return_value;
 }
 
+int compare(const void *a, const void *b) {
+    return (*(double *)a > *(double *)b) - (*(double *)a < *(double *)b);
+}
+
+double percentile(double *data, int size, double percentile) {
+    qsort(data, size, sizeof(double), compare);
+    int index = (int)ceil(percentile * size) - 1;
+    return data[index];
+}
+
 /******************************************************************************
  *
  ******************************************************************************/
@@ -4426,10 +4437,14 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	struct ibv_wc           wc;
 
 	uint64_t	   	tot_iters;
-	struct timeval tv_start, tv_end, tv_sw;
+	struct timeval tv_start, tv_end;
 	int 			num_of_qps = user_param->num_of_qps;
-	double sec_elapsed, sec_elapsed_sw;
+	double sec_elapsed;
 	int			index, dcs_idx, dscs_num, streams;
+	double *times;	// 用于存储每次循环的耗时
+	int iter_count = 0; // 记录实际的循环次数
+	double total_time = 0.0;  // 用于计算平均值
+	double min_time = INFINITY;  // 初始化最小时间为正无穷
 
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
@@ -4463,9 +4478,14 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	//sub_num = num_of_qps/DSCS_NUM;
 	streams = 1 << user_param->log_dci_streams;
 	dscs_num = num_of_qps/streams;
-	gettimeofday(&tv_start, NULL);
+
+	// 为记录耗时分配内存
+	times = (double *)malloc(tot_iters * sizeof(double));
+
 	/* Done with setup. Start the test. */
 	while (scnt < tot_iters) {
+		// 记录每次循环的开始时间
+		gettimeofday(&tv_start, NULL);
 		int rc;
 		for (dcs_idx = 0; dcs_idx < dscs_num; dcs_idx++) {
 			ibv_wr_start(ctx->qpx[dcs_idx]);
@@ -4500,10 +4520,10 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 			rc = ibv_wr_complete(ctx->qpx[dcs_idx]);
 			if (rc) {
 				fprintf(stderr,"Couldn't complete: scnt=%lu, rc=%d\n",scnt, rc);
+				free(times);  // 释放内存
 				return 1;
 			}
 		}
-		gettimeofday(&tv_sw, NULL);
 
 		for (dcs_idx = 0; dcs_idx < dscs_num; dcs_idx++) {
 			do {
@@ -4512,6 +4532,7 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 					if (wc.status != IBV_WC_SUCCESS) {
 						//coverity[uninit_use_in_call]
 						NOTIFY_COMP_ERROR_SEND(wc,scnt,scnt);
+						free(times);  // 释放内存
 						return 1;
 					}
 
@@ -4520,20 +4541,33 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 
 				} else if (ne < 0) {
 					fprintf(stderr, "poll CQ failed %d\n", ne);
+					free(times);  // 释放内存
 					return FAILURE;
 				}
 
 			} while (ne == 0);
 		}
 
-		break;
+		// 记录每次循环的结束时间并计算耗时
+		gettimeofday(&tv_end, NULL);
+		sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) + (tv_end.tv_usec - tv_start.tv_usec) * 1e-6;
+		times[iter_count++] = sec_elapsed;
+		// 更新总时间和最小时间
+		total_time += sec_elapsed;
+		if (sec_elapsed < min_time) {
+			min_time = sec_elapsed;
+		}
+
 	}
-	gettimeofday(&tv_end, NULL);
-	sec_elapsed = (tv_end.tv_sec - tv_start.tv_sec) +
-                  (tv_end.tv_usec - tv_start.tv_usec) * 1e-6;
-	sec_elapsed_sw = (tv_sw.tv_sec - tv_start.tv_sec) +
-                  (tv_sw.tv_usec - tv_start.tv_usec) * 1e-6;
-	fprintf(stdout, "sec_elapsed = %.6f sec_elapsed_sw = %.6f\n", sec_elapsed, sec_elapsed_sw);
+	// 计算 p50 和 p99
+	double p50 = percentile(times, iter_count, 0.50);
+	double p99 = percentile(times, iter_count, 0.99);
+	double avg_time = total_time / iter_count;
+	// 输出 min, average, p50 和 p99
+	fprintf(stdout, "Min = %.6f seconds, Avg = %.6f seconds, P50 = %.6f seconds, P99 = %.6f seconds\n",
+		min_time, avg_time, p50, p99);
+	free(times);  // 释放内存
+
 	return 0;
 }
 
