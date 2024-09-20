@@ -4506,7 +4506,7 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 				ibv_wr_rdma_write(ctx->qpx[dcs_idx], wr->wr.rdma.rkey, wr->wr.rdma.remote_addr);
 
 				//fprintf(stderr,"ctx->qp[0]->qp_num = 0x%x, ctx->dci_stream_id[0]=%d\n",ctx->qp[0]->qp_num, ctx->dci_stream_id[0]);
-				mlx5dv_wr_set_dc_addr_stream(ctx->dv_qp[dcs_idx], ctx->ah[0],
+				mlx5dv_wr_set_dc_addr_stream(ctx->dv_qp[dcs_idx], ctx->ah[index + dcs_idx * streams],
 								ctx->r_dctn[index + dcs_idx * streams], DC_KEY,
 								ctx->dci_stream_id[dcs_idx]);
 				ctx->dci_stream_id[dcs_idx] = (ctx->dci_stream_id[dcs_idx] + 1) & (0xffffffff >> (32 - (user_param->log_active_dci_streams)));
