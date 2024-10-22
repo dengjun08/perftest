@@ -2370,6 +2370,7 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 					if (user_param->log_dci_streams) {
 						attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DCI_STREAMS;
 						attr_dv.dc_init_attr.dci_streams.log_num_concurent = user_param->log_dci_streams;
+						attr_dv.dc_init_attr.dci_streams.log_num_errored = user_param->log_dci_streams;
 					}
 					#endif
 				}
@@ -4530,6 +4531,30 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 				ne = ibv_poll_cq(ctx->send_cq, 1, &wc);
 				if(ne > 0) {
 					if (wc.status != IBV_WC_SUCCESS) {
+						int rc;
+						struct ibv_qp_attr qp_attr;
+						struct ibv_qp_init_attr init_attr;
+						memset(&qp_attr,0,sizeof(struct ibv_qp_attr));
+						memset(&init_attr,0,sizeof(struct ibv_qp_init_attr));
+
+						fprintf(stderr, "wc.status=%d wc.wr_id=%ld streams=%d vend synd:0x%x\n",wc.status, wc.wr_id, streams, wc.vendor_err);
+						rc = ibv_query_qp(ctx->qp[wc.wr_id/streams], &qp_attr, IBV_QP_STATE, &init_attr);
+						if (rc) {
+							fprintf(stderr, "ibv_query_qp failed to queue state\n");
+							goto err_return;
+						}
+
+						fprintf(stderr, "ibv_query_qp queue state:%d\n", qp_attr.qp_state);
+						if (qp_attr.qp_state == IBV_QPS_RTS) {
+							rc = mlx5dv_dci_stream_id_reset(ctx->qp[wc.wr_id/streams],wc.wr_id%streams);
+							if (rc) {
+								fprintf(stderr, "reset stream id fail rc:%d\n",rc);
+								goto err_return;
+							}
+							fprintf(stderr, "reset stream id sucess, continue\n");
+							continue;
+						}
+err_return:
 						//coverity[uninit_use_in_call]
 						NOTIFY_COMP_ERROR_SEND(wc,scnt,scnt);
 						free(times);  // 释放内存
